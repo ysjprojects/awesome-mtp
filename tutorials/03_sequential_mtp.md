@@ -108,8 +108,9 @@ cost stay at the one-module level; the price is that one module has to be good a
 
 ## Exercises
 
-1. Train `--n-future 1` sequential and evaluate acceptance at draft length 3 in chapter 04, then
-   do the same with `--n-future 3 --share-weights`. That gap is the train/inference mismatch.
+1. Train `--n-future 1` sequential and decode it at `--draft-len 3 --recursive` (chapter 04),
+   then do the same with `--n-future 3 --share-weights`. That gap is the train/inference
+   mismatch; chapter 05 reports it for the reference sweep.
 2. Add a second block per module (`--head-layers 2`); does `val_acc2` improve more than
    `val_acc1`? What did it cost in drafting time?
 3. DeepSeek-V3 feeds the *token embedding* of `x[t + k]`; EAGLE feeds the trunk's *feature* for

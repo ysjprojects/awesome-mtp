@@ -136,20 +136,32 @@ class SequentialMTP(nn.Module):
         self.modules_ = nn.ModuleList(MTPModule(cfg, mtp_cfg.head_layers) for _ in range(n_modules))
         init_weights(self, cfg.n_layers)
 
-    def module(self, k: int) -> MTPModule:
+    def module(self, k: int, recursive: bool = False) -> MTPModule:
+        """Parameters used at depth ``k``.
+
+        With ``share_weights`` every depth uses the single module. Otherwise depth ``k`` has its own
+        module up to ``n_future``; beyond that, ``recursive=True`` reuses the deepest module (what
+        DeepSeek-V3 does when its single module drafts several steps), and ``recursive=False`` raises
+        so that the mismatch is opt-in rather than silent.
+        """
         if k < 1:
             raise ValueError("depth must be >= 1")
         if self.share_weights:
             return self.modules_[0]
         if k > self.n_future:
+            if recursive:
+                return self.modules_[-1]
             raise ValueError(
-                f"depth {k} > n_future={self.n_future}; recursive drafting beyond the trained depth "
-                "requires share_weights=True"
+                f"depth {k} > n_future={self.n_future}; drafting beyond the trained depth needs "
+                "share_weights=True (trained for it) or recursive=True (untrained reuse of the deepest module)"
             )
         return self.modules_[k - 1]
 
-    def new_caches(self, k: int, batch: int, max_len: int, trunk) -> list[KVCache]:
-        return [KVCache(batch, self.cfg.n_heads, max_len, self.cfg.head_dim, trunk.device, trunk.dtype) for _ in self.module(k).blocks]
+    def new_caches(self, k: int, batch: int, max_len: int, trunk, recursive: bool = False) -> list[KVCache]:
+        return [
+            KVCache(batch, self.cfg.n_heads, max_len, self.cfg.head_dim, trunk.device, trunk.dtype)
+            for _ in self.module(k, recursive).blocks
+        ]
 
     def step(
         self,
@@ -159,15 +171,23 @@ class SequentialMTP(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         caches: list[KVCache] | None = None,
+        recursive: bool = False,
     ) -> torch.Tensor:
         """Run depth ``k`` over a chunk of slots. ``prev_h`` are depth ``k-1`` states (depth 0 = trunk),
         ``tok_emb`` the embeddings of the tokens ``k`` positions ahead of those slots."""
-        return self.module(k)(prev_h, tok_emb, cos, sin, caches)
+        return self.module(k, recursive)(prev_h, tok_emb, cos, sin, caches)
 
-    def logits(self, k: int, h_k: torch.Tensor, trunk) -> torch.Tensor:
-        return trunk.unembed(self.module(k).norm_out(h_k))
+    def logits(self, k: int, h_k: torch.Tensor, trunk, recursive: bool = False) -> torch.Tensor:
+        return trunk.unembed(self.module(k, recursive).norm_out(h_k))
 
-    def forward_train(self, h0: torch.Tensor, idx: torch.Tensor, trunk, n_depths: int | None = None) -> list[torch.Tensor]:
+    def forward_train(
+        self,
+        h0: torch.Tensor,
+        idx: torch.Tensor,
+        trunk,
+        n_depths: int | None = None,
+        recursive: bool = False,
+    ) -> list[torch.Tensor]:
         """Teacher-forced hidden states ``[h_1, ..., h_D]``; ``h_k`` has shape ``(B, T - k, d)`` and
         slot ``t`` predicts token ``t + 1 + k``."""
         n_depths = self.n_future if n_depths is None else n_depths
@@ -178,7 +198,7 @@ class SequentialMTP(nn.Module):
             prev = prev[:, : T - k]
             emb = trunk.embed(idx[:, k:])
             cos, sin = trunk.rope(torch.arange(k, T, device=idx.device))
-            prev = self.step(k, prev, emb, cos, sin)
+            prev = self.step(k, prev, emb, cos, sin, recursive=recursive)
             outs.append(prev)
         return outs
 

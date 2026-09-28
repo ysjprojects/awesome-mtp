@@ -8,9 +8,11 @@
 > MTP toolkit. The early chapters are deliberately gentle; the hard parts (EAGLE-style feature
 > drafting, tree verification, RL interaction, loading real checkpoints, serving) come next.
 
-**Status:** Part I written. Chapters 01-04 and the framework they build are complete and
-tested (`pytest`: 25 tests, including an exact lossless-decoding check against greedy search).
-Chapters 05-12 are planned; see [the roadmap](#12-the-tutorial-roadmap-and-status).
+[![tests](https://github.com/ysjprojects/awesome-mtp/actions/workflows/tests.yml/badge.svg)](https://github.com/ysjprojects/awesome-mtp/actions/workflows/tests.yml)
+
+**Status:** Part I written. Chapters 01-05 and the framework they build are complete and
+tested (`pytest`: 31 tests, including an exact lossless-decoding check against greedy search).
+Chapters 06-12 are planned; see [the roadmap](#12-the-tutorial-roadmap-and-status).
 
 ---
 
@@ -29,6 +31,8 @@ Chapters 05-12 are planned; see [the roadmap](#12-the-tutorial-roadmap-and-statu
 11. [Open problems](#11-open-problems)
 12. [The tutorial: roadmap and status](#12-the-tutorial-roadmap-and-status)
 13. [Quickstart](#13-quickstart)
+14. [Glossary, and how to read a model card's MTP line](#14-glossary-and-how-to-read-a-model-cards-mtp-line)
+15. [FAQ](#15-faq)
 
 ---
 
@@ -226,7 +230,9 @@ measures +28-44% per-step cost for the shipping DeepSeek-style heads at 1M token
 shift between the drafter's training data and the request stream (multi-LoRA serving reports
 degraded acceptance; RL raises entropy and lowers acceptance), and the train/inference mismatch
 when a head trained for depth 1 is applied recursively at depth 2 and 3 (the reason GLM-5,
-Nemotron 3 Super and FastMTP share and recursively train their heads).
+Nemotron 3 Super and FastMTP share and recursively train their heads). Chapter 05 reproduces
+that last effect in miniature: three separate modules accept 51% of fourth-depth drafts when
+the deepest one is reused, one module trained at three depths accepts 85%.
 
 ## 5. Head designs in depth
 
@@ -489,7 +495,7 @@ depend on the tokenizer.
 | 02 | [Parallel heads](tutorials/02_parallel_heads.md) | Gloeckle heads and Medusa heads; target alignment; the memory-efficient per-head backward | done |
 | 03 | [Sequential MTP](tutorials/03_sequential_mtp.md) | the DeepSeek-V3 module; shared-weight recursive variant; per-depth accuracy | done |
 | 04 | [Self-speculative decoding](tutorials/04_self_speculative_decoding.md) | draft / verify / accept / rewind for both head families; greedy and rejection sampling; the lossless proof; acceptance-to-speedup arithmetic | done |
-| 05 | Measuring MTP | acceptance vs. depth, tokens per round, the effect of `lambda`, depth count and shared weights; reproducing the tables in this README | next |
+| 05 | [Measuring MTP](tutorials/05_measuring_mtp.md) | a controlled sweep: loss weight, detached vs joint training, block vs MLP heads, separate vs shared vs recursively-reused modules; acceptance-by-depth, tokens-per-pass and speedup-model figures | done |
 | 06 | Feature-level drafting and trees | an EAGLE-style drafter on trunk features; tree verification; Medusa-style typical acceptance | planned |
 | 07 | Mask tokens, gated LoRA and registers | Apple-style masked-input MTP with gated LoRA and a sampler head; MuToR registers; ESP probing | planned |
 | 08 | Training recipes | loss-weight schedules, forward/reverse curricula, decay-phase head expansion, self-distillation (FastMTP), AdaMTP masking | planned |
@@ -510,9 +516,34 @@ scripts/train_all.sh                          # or run the four `python -m mtp.t
 
 # decode: plain autoregressive vs. self-speculative, with acceptance statistics
 python -m mtp.bench --ckpt runs/seq2/ckpt.pt    --draft-len 1 2 --prompt "ROMEO:" --max-new-tokens 200
-python -m mtp.bench --ckpt runs/shared3/ckpt.pt --draft-len 1 2 3 4                 # recursive drafting
+python -m mtp.bench --ckpt runs/shared3/ckpt.pt --draft-len 1 2 3 4                 # shared module, trained for recursion
+python -m mtp.bench --ckpt runs/seq2/ckpt.pt    --draft-len 3 --recursive            # reuse the deepest module past its depth
 python -m mtp.bench --ckpt runs/parallel3/ckpt.pt --draft-len 1 2 3 --temperature 0.8 --seed 1
+
+# chapter 05: the controlled sweep and its figures (~35 min)
+python scripts/sweep.py && python scripts/plot_results.py
 ```
+
+As a library:
+
+```python
+import torch
+from mtp import ModelConfig, MTPConfig, MTPModel, train_step, speculative_generate
+
+model = MTPModel(ModelConfig(vocab_size=65, d_model=256, n_layers=6, n_heads=8, max_seq_len=512),
+                 MTPConfig(kind="sequential", n_future=3, share_weights=True, loss_weight=0.3))
+opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+idx, targets = ...                       # (B, T) and the same shifted by one
+losses = train_step(model, idx, targets)  # forward + memory-efficient backward; .ntp, .mtp[k], .total
+opt.step(); opt.zero_grad()
+
+out, stats = speculative_generate(model.eval(), prompt_ids, max_new_tokens=200, draft_len=3)
+print(stats.summary())                    # acceptance by depth, tokens per trunk pass
+```
+
+Extending it (a new head family, drafter, or objective) is documented in
+[`docs/extending.md`](docs/extending.md).
 
 Repository layout:
 
@@ -527,8 +558,9 @@ mtp/
   metrics.py  per-depth accuracy, acceptance -> tokens-per-round -> speedup arithmetic
   data.py     character-level TinyShakespeare
   train.py    training CLI          bench.py   decoding benchmark CLI
-tutorials/    chapters 01-04
-tests/        layers, loss (incl. memory-efficient == naive gradients), decoding (lossless, cache consistency, sampling distribution)
+scripts/      train_all.sh (reference runs), sweep.py (chapter 05 sweep), plot_results.py (figures)
+tutorials/    chapters 01-05           assets/    figures produced by plot_results.py
+tests/        layers, loss (incl. memory-efficient == naive gradients), decoding (lossless, cache consistency, recursion, sampling distribution), metrics
 ```
 
 Reference results from `scripts/train_all.sh` (6-layer, `d = 256` trunk, 1200 steps, sequence
@@ -545,6 +577,74 @@ in [chapter 04](tutorials/04_self_speculative_decoding.md#results).
 
 The parallel-vs-sequential gap at depth 2 (0.28 vs 0.56) is the single most useful number in
 this repository: it is why every production MTP model uses the chained design.
+
+[Chapter 05](tutorials/05_measuring_mtp.md) adds a controlled sweep (`scripts/sweep.py`, nine
+variants, same trunk and budget): the auxiliary loss weight in {0.1, 0.3, 1.0} neither hurts
+the next-token head nor changes depth-1 quality much; joint training beats a frozen trunk for
+the head at no cost to the trunk; block heads edge out MLP heads; and reusing a module past its
+trained depth costs roughly 30 points of acceptance at that depth, which shared-weight training
+recovers.
+
+![conditional acceptance by depth for the nine sweep variants](assets/acceptance_by_depth.png)
+
+## 14. Glossary, and how to read a model card's MTP line
+
+| Term | Meaning here |
+|---|---|
+| **depth `k`** | the head that reads position `t` and predicts `x[t + 1 + k]`; depth 0 is ordinary next-token prediction |
+| **`n_future = D`** | number of extra depths trained. "MTP-1", "one MTP layer", `num_nextn_predict_layers = 1` all mean `D = 1`; Gloeckle et al.'s `n = 4` means `D = 3` |
+| **draft length `K`** | tokens proposed per round at inference; `K <= D` for parallel heads, any `K` for shared-weight or recursively reused sequential modules |
+| **recursive drafting** | applying a module at a depth it was not trained for (a `D = 1` module drafting 3 tokens). Works, with reduced acceptance; shared-weight training removes the mismatch |
+| **conditional acceptance `alpha_k`** | P(depth-`k` draft accepted, given all shallower drafts were). The per-depth numbers in this repo's tables |
+| **acceptance rate** (papers) | usually `alpha_1`, sometimes the mean over all drafted tokens; check which |
+| **acceptance length** | mean accepted drafts per verify pass, `sum_k prod_{j<=k} alpha_j`; GLM-5's "2.76" is this |
+| **tokens per step / per pass** | acceptance length + 1 (the bonus token). The quantity that turns into speedup |
+| **bonus token** | the token the verify pass yields from the target distribution at the last accepted position; free, and the reason `K = 0` still gives one token |
+| **committed vs decided** | in `decode.py`, committed tokens have gone through the trunk (they are in the KV cache); the decided-but-uncommitted `t1` is the next round's first verify input |
+| **teacher-forced accuracy** | top-1 accuracy of depth `k` against the *corpus* with the true prefix; predicts greedy acceptance but is measured without decoding |
+| **MTP prefill / draft-KV tax** | running the draft modules over the whole prompt so their caches exist; scales with context length (Windowed-MTP) |
+| **lossless** | the output distribution equals the target model's (rejection sampling) or the output equals greedy search exactly (`temperature = 0`); typical-acceptance and self-distilled parallel decoders are not lossless |
+
+Reading a model card: "trained with MTP, `D` layers" tells you the auxiliary loss was used and
+how many depths exist as weights; whether the serving stack *uses* them (`speculative_config`
+in vLLM, `--speculative-algorithm` in SGLang, the llama.cpp/mlx flags) is a separate question,
+and the acceptance numbers quoted are only meaningful with the draft length, sampling settings,
+batch size and workload attached.
+
+## 15. FAQ
+
+**Does MTP change what the model generates?** Not when the heads are used as a verified
+drafter: greedy output is identical, sampled output has the same distribution. It changes the
+*weights* (the auxiliary loss shapes the trunk), which is a separate, usually small, effect on
+quality that Section 4.1 discusses. Standalone multi-token decoders (self-distillation,
+K-Forcing, Apple's sampler) do change outputs and trade quality for speed.
+
+**Is MTP the same as speculative decoding?** MTP is a training objective; self-speculative
+decoding is how the resulting heads are used. Every MTP model can be run without its heads, and
+speculative decoding can be run with an external draft model instead of heads.
+
+**Parallel or sequential heads?** Sequential, unless you need all drafts in one pass. Chapter 04's
+tables show depth-2 accuracy of 0.28 (parallel) vs 0.56 (sequential) on the same trunk, and
+every production model since DeepSeek-V3 uses the chain.
+
+**How many depths should I train?** One to three. `D = 1` with recursive use is the cheapest and
+what DeepSeek-V3/V4 ship; `D = 3` with shared weights (GLM-5, Nemotron 3 Super) buys a longer
+acceptance length at the same parameter cost; more than that has not been shown to pay for
+itself on text.
+
+**Why do papers report such different speedups for similar acceptance?** Because speedup is
+acceptance length divided by the relative cost of a round, and the cost depends on the head/trunk
+ratio, batch size, MoE routing, context length and engine overheads. Chapter 05 plots the same
+acceptance numbers under a 6-layer and a 60-layer trunk to make the point.
+
+**Will MTP make my small model better?** Probably not by itself; sub-1B models have been shown
+to lose on benchmarks with head-based MTP. Use a smaller `lambda`, a forward curriculum, or a
+proxy objective (TOP), and treat the heads as a drafter rather than a quality lever.
+
+**Does MTP work with MoE / hybrid-attention / linear-attention trunks?** Yes; DeepSeek, Qwen3-Next,
+Nemotron 3 Super, Kimi K3 and Gemma 4 all pair it with non-vanilla trunks. The head usually stays
+dense and full-attention (LongCat chose dense deliberately), which is exactly what becomes the
+bottleneck at very long context.
 
 ## Contributing
 

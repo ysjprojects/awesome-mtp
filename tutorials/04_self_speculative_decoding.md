@@ -81,8 +81,10 @@ The first round pays the "MTP prefill": each depth runs over the whole prompt. T
 draft-KV cost Windowed-MTP measures at million-token context; at our sizes it is invisible.
 
 Recursive drafting beyond the trained depth (`--draft-len 4` on a `--n-future 3 --share-weights`
-model) uses the same code path with the shared module at every depth; without `--share-weights`
-the decoder raises, because depth `D+1` has no parameters.
+model) uses the same code path with the shared module at every depth. Without shared weights,
+depth `D+1` has no parameters of its own; pass `--recursive` to reuse the deepest module there
+(DeepSeek-V3's practice with its single module), or the decoder raises so the mismatch is never
+silent. Chapter 05 measures what that reuse costs.
 
 ## From acceptance to speed
 
@@ -157,8 +159,8 @@ What the table says:
    on the model's own samples rather than on the corpus.
 3. **Shared-weight recursion works past the trained depth.** `shared3` at `K = 4` still accepts
    84% of the never-trained fourth drafts, and reaches ~3 tokens per trunk pass; the module has
-   learned to consume its own output. (Exercise 1 in chapter 03 measures what a `D = 1` module
-   does at depth 2 and 3 without that training.)
+   learned to consume its own output. (Chapter 05 measures what a `D = 1` module does at depth
+   2 and 3 without that training, via `--recursive`.)
 4. **Rejection sampling is more forgiving than argmax matching.** With `T = 0.8` the same model
    accepts 93/92/84% and decides 3.5 tokens per pass: a draft is accepted whenever the target
    agrees with it *in probability*, not only when both argmaxes coincide.

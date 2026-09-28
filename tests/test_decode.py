@@ -7,13 +7,15 @@ from conftest import VOCAB, make_model, sample_chain, trained_model, transition_
 from mtp import SpeculativeDecoder, generate, speculative_generate
 
 CONFIGS = [
-    # (kind, n_future, head_arch, share_weights, draft_len)
-    ("parallel", 3, "block", False, 3),
-    ("parallel", 2, "block", False, 1),
-    ("parallel", 2, "mlp", False, 2),
-    ("sequential", 2, "block", False, 2),
-    ("sequential", 3, "block", False, 2),
-    ("sequential", 1, "block", True, 3),  # one shared module drafted recursively beyond its trained depth
+    # (kind, n_future, head_arch, share_weights, draft_len, recursive)
+    ("parallel", 3, "block", False, 3, False),
+    ("parallel", 2, "block", False, 1, False),
+    ("parallel", 2, "mlp", False, 2, False),
+    ("sequential", 2, "block", False, 2, False),
+    ("sequential", 3, "block", False, 2, False),
+    ("sequential", 1, "block", True, 3, False),  # one shared module, trained for recursion
+    ("sequential", 1, "block", False, 3, True),  # DeepSeek-V3 practice: reuse an untrained-for-it module
+    ("sequential", 2, "block", False, 3, True),  # deepest of two modules reused at depth 3
 ]
 
 
@@ -44,14 +46,14 @@ def test_generate_matches_uncached_argmax_loop():
     assert torch.equal(out, seq)
 
 
-@pytest.mark.parametrize("kind,n_future,head_arch,share,K", CONFIGS)
-def test_speculative_greedy_decoding_is_lossless(kind, n_future, head_arch, share, K):
+@pytest.mark.parametrize("kind,n_future,head_arch,share,K,recursive", CONFIGS)
+def test_speculative_greedy_decoding_is_lossless(kind, n_future, head_arch, share, K, recursive):
     model = trained_model(kind, n_future, head_arch, share)
     for candidate, expect_rejections in ((model, False), (_with_random_heads(model), True)):
         accepted = rejected = 0
         for prompt in _prompts(3):
             greedy = generate(candidate, prompt, 40)
-            spec, stats = speculative_generate(candidate, prompt, 40, K)
+            spec, stats = speculative_generate(candidate, prompt, 40, K, recursive=recursive)
             assert spec.shape == greedy.shape
             assert torch.equal(spec, greedy), (kind, n_future, K)
             assert stats.generated >= 40 and stats.rounds >= 1
@@ -65,13 +67,13 @@ def test_speculative_greedy_decoding_is_lossless(kind, n_future, head_arch, shar
             assert accepted > 0
 
 
-@pytest.mark.parametrize("kind,n_future,head_arch,share,K", CONFIGS)
-def test_drafter_state_matches_teacher_forced_forward(kind, n_future, head_arch, share, K):
+@pytest.mark.parametrize("kind,n_future,head_arch,share,K,recursive", CONFIGS)
+def test_drafter_state_matches_teacher_forced_forward(kind, n_future, head_arch, share, K, recursive):
     """After several rounds (with rewinds), the incremental drafter must produce exactly the
     logits a from-scratch teacher-forced forward over the same tokens produces."""
     model = _with_random_heads(trained_model(kind, n_future, head_arch, share))
     prompt = _prompts(1)[0]
-    dec = SpeculativeDecoder(model, prompt, max_new_tokens=60, draft_len=K)
+    dec = SpeculativeDecoder(model, prompt, max_new_tokens=60, draft_len=K, recursive=recursive)
     for _ in range(6):
         dec.round()
     with torch.no_grad():
@@ -79,13 +81,14 @@ def test_drafter_state_matches_teacher_forced_forward(kind, n_future, head_arch,
         n = dec.n
         if kind == "parallel":
             seq = dec.tokens[:n][None]
+            hs = model.heads.forward_train(model.trunk(seq), seq, model.trunk, n_depths=K)
+            refs = [model.heads.logits(k, hs[k - 1][:, n - 1], model.trunk) for k in range(1, K + 1)]
         else:
             seq = torch.cat((dec.tokens[:n], dec.t1[None], drafts[0, : K - 1]))[None]
-        h0 = model.trunk(seq)
-        hs = model.heads.forward_train(h0, seq, model.trunk, n_depths=K)
+            hs = model.heads.forward_train(model.trunk(seq), seq, model.trunk, n_depths=K, recursive=recursive)
+            refs = [model.heads.logits(k, hs[k - 1][:, n - 1], model.trunk, recursive=recursive) for k in range(1, K + 1)]
         for k in range(1, K + 1):
-            ref = model.heads.logits(k, hs[k - 1][:, n - 1], model.trunk)
-            assert torch.allclose(dec.drafter.last_logits[k - 1], ref, atol=1e-4), k
+            assert torch.allclose(dec.drafter.last_logits[k - 1], refs[k - 1], atol=1e-4), k
 
 
 def test_speculative_sampling_matches_target_distribution():
@@ -114,7 +117,8 @@ def test_invalid_speculative_configurations_are_rejected():
     with pytest.raises(ValueError):
         SpeculativeDecoder(par, prompt, 5, draft_len=3)  # parallel heads have fixed offsets
     with pytest.raises(ValueError):
-        SpeculativeDecoder(seq, prompt, 5, draft_len=3)  # recursion needs share_weights
+        SpeculativeDecoder(seq, prompt, 5, draft_len=3)  # beyond trained depth needs share_weights or recursive=True
+    SpeculativeDecoder(seq, prompt, 5, draft_len=3, recursive=True)  # explicit opt-in is fine
     with pytest.raises(ValueError):
         SpeculativeDecoder(seq, torch.randint(0, VOCAB, (2, 5)), 5, draft_len=1)  # batch > 1
     with pytest.raises(ValueError):

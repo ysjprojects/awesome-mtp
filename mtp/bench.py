@@ -30,6 +30,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu", help="cpu is fastest for these tiny models on Apple silicon; pass cuda if you have it")
     p.add_argument("--show", action="store_true", help="print the generated text")
+    p.add_argument(
+        "--recursive",
+        action="store_true",
+        help="let a sequential model draft beyond its trained depth by reusing its deepest module (DeepSeek-V3 practice)",
+    )
     a = p.parse_args(argv)
 
     device = pick_device(a.device)
@@ -56,7 +61,7 @@ def main(argv: list[str] | None = None) -> None:
         gen = torch.Generator().manual_seed(a.seed)
         sync(device)
         t0 = time.perf_counter()
-        out, stats = speculative_generate(model, idx, a.max_new_tokens, K, a.temperature, a.top_k, gen)
+        out, stats = speculative_generate(model, idx, a.max_new_tokens, K, a.temperature, a.top_k, gen, a.recursive)
         sync(device)
         t_spec = time.perf_counter() - t0
         same = torch.equal(out, base)

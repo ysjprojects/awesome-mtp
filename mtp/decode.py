@@ -160,9 +160,10 @@ class _SequentialDrafter:
 
     def __init__(self, dec: "SpeculativeDecoder"):
         self.heads = dec.model.heads
+        self.recursive = dec.recursive
         K = dec.draft_len
-        self.heads.module(K)  # raises early if K exceeds what the heads can do
-        self.caches = [self.heads.new_caches(k, 1, dec.capacity, dec.trunk) for k in range(1, K + 1)]
+        self.heads.module(K, self.recursive)  # raises early if K exceeds what the heads can do
+        self.caches = [self.heads.new_caches(k, 1, dec.capacity, dec.trunk, self.recursive) for k in range(1, K + 1)]
         self.outs = [torch.empty(1, dec.capacity, dec.model.cfg.d_model, device=dec.device, dtype=dec.trunk.dtype) for _ in range(K)]
         self.len = [0] * K  # committed valid slots per depth
         self.last_logits: list[torch.Tensor] = []
@@ -180,10 +181,10 @@ class _SequentialDrafter:
             ahead = torch.cat((dec.tokens[start + k : n], torch.stack(proposals[:n_proposed])))
             emb = dec.trunk.embed(ahead[None])
             cos, sin = dec.trunk.rope(torch.arange(start + k, n + k, device=dec.device))
-            h_k = self.heads.step(k, prev, emb, cos, sin, self.caches[k - 1])
+            h_k = self.heads.step(k, prev, emb, cos, sin, self.caches[k - 1], recursive=self.recursive)
             self.outs[k - 1][:, start:n] = h_k
             self.len[k - 1] = n
-            logits = self.heads.logits(k, h_k[:, -1], dec.trunk)  # (1, V)
+            logits = self.heads.logits(k, h_k[:, -1], dec.trunk, recursive=self.recursive)  # (1, V)
             self.last_logits.append(logits)
             q = dec.probs(logits)
             probs.append(q)
@@ -210,7 +211,10 @@ class SpeculativeDecoder:
         temperature: float = 0.0,
         top_k: int | None = None,
         generator: torch.Generator | None = None,
+        recursive: bool = False,
     ):
+        """``recursive=True`` lets a sequential model draft beyond its trained depth by reusing its
+        deepest module (DeepSeek-V3 practice); models trained with ``share_weights`` never need it."""
         if model.heads is None:
             raise ValueError("speculative decoding needs a model with MTP heads")
         if idx.shape[0] != 1:
@@ -220,6 +224,7 @@ class SpeculativeDecoder:
         self.model, self.trunk = model, model.trunk
         self.device = self.trunk.device
         self.draft_len, self.temperature, self.top_k, self.generator = draft_len, temperature, top_k, generator
+        self.recursive = recursive
         self.max_new_tokens = max_new_tokens
         T = idx.shape[1]
         self.capacity = T + max_new_tokens + draft_len + 1
@@ -315,8 +320,9 @@ def speculative_generate(
     temperature: float = 0.0,
     top_k: int | None = None,
     generator: torch.Generator | None = None,
+    recursive: bool = False,
 ) -> tuple[torch.Tensor, SpecStats]:
-    dec = SpeculativeDecoder(model, idx, max_new_tokens, draft_len, temperature, top_k, generator)
+    dec = SpeculativeDecoder(model, idx, max_new_tokens, draft_len, temperature, top_k, generator, recursive)
     while not dec.done:
         dec.round()
     return dec.output(), dec.stats
