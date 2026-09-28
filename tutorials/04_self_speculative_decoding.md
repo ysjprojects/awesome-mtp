@@ -117,7 +117,60 @@ drafts per round and tokens per trunk pass.
 
 ## Results
 
-RESULTS_PLACEHOLDER
+All four reference models (`scripts/train_all.sh`: 6-layer, `d = 256` trunk, 1200 steps, batch
+32, sequence 256, character-level TinyShakespeare, one seed). Validation numbers are averaged
+over ten batches; `acc_k` is teacher-forced top-1 accuracy of depth `k`.
+
+| run | heads | val NTP loss | acc_0 | acc_1 | acc_2 | acc_3 |
+|---|---|---|---|---|---|---|
+| `ntp` | none | 1.538 | 0.561 | - | - | - |
+| `parallel3` | 3 Gloeckle blocks | 1.514 | 0.563 | 0.387 | 0.280 | 0.225 |
+| `seq2` | 2 DeepSeek-V3 modules | 1.523 | 0.561 | 0.551 | 0.557 | - |
+| `shared3` | 1 module shared across 3 depths | 1.528 | 0.559 | 0.545 | 0.557 | 0.558 |
+
+Self-speculative decoding of 200 characters from `ROMEO:`; greedy unless stated, output verified
+identical to plain greedy decoding in every greedy row.
+
+| run | K | conditional acceptance by depth | tokens per trunk pass |
+|---|---|---|---|
+| `parallel3` | 1 | 0.55 | 1.55 |
+| `parallel3` | 2 | 0.50, 0.57 | 1.79 |
+| `parallel3` | 3 | 0.52, 0.58, 0.42 | 1.95 |
+| `seq2` | 1 | 0.70 | 1.70 |
+| `seq2` | 2 | 0.67, 0.74 | 2.17 |
+| `shared3` | 1 | 0.72 | 1.72 |
+| `shared3` | 2 | 0.75, 0.83 | 2.37 |
+| `shared3` | 3 | 0.72, 0.85, 0.70 | 2.76 |
+| `shared3` | 4 (one deeper than trained) | 0.72, 0.79, 0.66, 0.84 | 2.97 |
+| `shared3`, sampling `T = 0.8` | 3 | 0.93, 0.92, 0.84 | 3.51 |
+
+What the table says:
+
+1. **Conditioning on the intermediate token is the whole game.** At depth 1 the parallel head is
+   39% accurate, the chained module 55%; at depth 2, 28% against 56%. Parallel heads decay with
+   depth because they predict `x[t+3]` marginally; the chain does not, because each depth sees
+   the true token before the one it predicts. This is the empirical reason production models
+   use the DeepSeek design.
+2. **Greedy acceptance exceeds teacher-forced accuracy** (0.70 vs. 0.55 at depth 1 for `seq2`):
+   greedy continuations are more predictable than real text. Acceptance is a property of the
+   *decoding* distribution, which is why FastMTP and self-distillation methods train drafters
+   on the model's own samples rather than on the corpus.
+3. **Shared-weight recursion works past the trained depth.** `shared3` at `K = 4` still accepts
+   84% of the never-trained fourth drafts, and reaches ~3 tokens per trunk pass; the module has
+   learned to consume its own output. (Exercise 1 in chapter 03 measures what a `D = 1` module
+   does at depth 2 and 3 without that training.)
+4. **Rejection sampling is more forgiving than argmax matching.** With `T = 0.8` the same model
+   accepts 93/92/84% and decides 3.5 tokens per pass: a draft is accepted whenever the target
+   agrees with it *in probability*, not only when both argmaxes coincide.
+5. **Wall-clock does not transfer from a toy.** On the CPU runs the speculative decoders ran at
+   0.7-1.06x the plain decoder: each depth costs one block against a six-block trunk, and a
+   round carries Python overhead comparable to a decode step. `metrics.speedup_estimate` for
+   `shared3`, `K = 3` gives `2.76 / (1 + 3/6) = 1.84x` under the memory-bound cost model; with a
+   one-block head on a 61-layer trunk (DeepSeek-V3) the same acceptance would give ~2.6x, which
+   is the regime the production numbers in the README come from.
+6. **The auxiliary loss did not hurt the next-token head** (1.514-1.528 vs. 1.538 validation
+   loss); the differences are within single-seed noise on a corpus this small, so this is not
+   evidence for a quality gain either.
 
 ## Exercises
 

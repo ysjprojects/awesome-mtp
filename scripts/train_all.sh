@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train the four reference models used in the tutorials (about 10 minutes each on an M1 Pro / MPS).
+# Train the four reference models used in the tutorials (5-9 minutes each on an M1 Pro / MPS).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=${PY:-python}

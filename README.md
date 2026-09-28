@@ -502,10 +502,10 @@ depend on the tokenizer.
 
 ```bash
 git clone git@github.com:ysjprojects/awesome-mtp.git && cd awesome-mtp
-uv venv && uv pip install -e ".[dev]"        # or: pip install -e ".[dev]"
-pytest                                        # 25 tests, ~40 s on a laptop CPU
+uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"    # or: pip install -e ".[dev]"
+pytest                                                                # 25 tests, ~40 s on a laptop CPU
 
-# train the four reference models (TinyShakespeare downloads on first use; ~10 min each on an M1 Pro)
+# train the four reference models (TinyShakespeare downloads on first use; 5-9 min each on an M1 Pro)
 scripts/train_all.sh                          # or run the four `python -m mtp.train ...` lines inside it
 
 # decode: plain autoregressive vs. self-speculative, with acceptance statistics
@@ -531,8 +531,20 @@ tutorials/    chapters 01-04
 tests/        layers, loss (incl. memory-efficient == naive gradients), decoding (lossless, cache consistency, sampling distribution)
 ```
 
-Reference results from `scripts/train_all.sh` (6-layer, d=256 trunk, 1200 steps, seq 256,
-batch 32, char-level TinyShakespeare, M1 Pro): see [`tutorials/04_self_speculative_decoding.md`](tutorials/04_self_speculative_decoding.md#results).
+Reference results from `scripts/train_all.sh` (6-layer, `d = 256` trunk, 1200 steps, sequence
+256, batch 32, character-level TinyShakespeare, one seed on an M1 Pro; greedy decoding of 200
+characters, speculative output verified identical to plain greedy). Full tables and discussion
+in [chapter 04](tutorials/04_self_speculative_decoding.md#results).
+
+| run | heads | val NTP loss | teacher-forced acc. depth 1 / 2 / 3 | best K | acceptance by depth | tokens per trunk pass |
+|---|---|---|---|---|---|---|
+| `ntp` | none | 1.538 | - | - | - | 1.00 |
+| `parallel3` | 3 Gloeckle blocks | 1.514 | 0.39 / 0.28 / 0.23 | 3 | 0.52, 0.58, 0.42 | 1.95 |
+| `seq2` | 2 DeepSeek-V3 modules | 1.523 | 0.55 / 0.56 / - | 2 | 0.67, 0.74 | 2.17 |
+| `shared3` | 1 module shared over 3 depths | 1.528 | 0.55 / 0.56 / 0.56 | 4 (recursive) | 0.72, 0.79, 0.66, 0.84 | 2.97 |
+
+The parallel-vs-sequential gap at depth 2 (0.28 vs 0.56) is the single most useful number in
+this repository: it is why every production MTP model uses the chained design.
 
 ## Contributing
 

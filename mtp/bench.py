@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--top-k", type=int, default=None)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default="auto")
+    p.add_argument("--device", default="cpu", help="cpu is fastest for these tiny models on Apple silicon; pass cuda if you have it")
     p.add_argument("--show", action="store_true", help="print the generated text")
     a = p.parse_args(argv)
 
@@ -49,7 +49,9 @@ def main(argv: list[str] | None = None) -> None:
     if a.show:
         print(ds_stub.decode(base[0]))
         print("-" * 60)
-
+    if model.heads is None:
+        print("model has no MTP heads; skipping speculative decoding")
+        return
     for K in a.draft_len:
         gen = torch.Generator().manual_seed(a.seed)
         sync(device)
