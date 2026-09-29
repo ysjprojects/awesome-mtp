@@ -37,11 +37,14 @@ class Losses:
     total: torch.Tensor
     ntp: torch.Tensor
     mtp: list[torch.Tensor] = field(default_factory=list)
+    feat: list[torch.Tensor] = field(default_factory=list)  # EAGLE-1 feature regression per depth
 
     def as_floats(self) -> dict[str, float]:
         out = {"total": float(self.total.detach()), "ntp": float(self.ntp.detach())}
         for k, l in enumerate(self.mtp, start=1):
             out[f"mtp{k}"] = float(l.detach())
+        for k, l in enumerate(self.feat, start=1):
+            out[f"feat{k}"] = float(l.detach())
         return out
 
 
@@ -58,10 +61,28 @@ def depth_loss(logits_k: torch.Tensor, targets: torch.Tensor, k: int) -> torch.T
     return cross_entropy(logits_k[:, :n], targets[:, k:])
 
 
-def combine(ntp: torch.Tensor, mtp: list[torch.Tensor], loss_weight: float) -> torch.Tensor:
-    if not mtp:
-        return ntp
-    return ntp + loss_weight / len(mtp) * torch.stack(mtp).sum()
+def feature_loss(h_k: torch.Tensor, h0: torch.Tensor, k: int) -> torch.Tensor:
+    """EAGLE-1 regression: depth ``k``'s state at slot ``t`` should look like the trunk's state at
+    position ``t + k`` (the state that predicts the same token). ``h0`` is a fixed target.
+
+    Both sides are divided by the target's per-position RMS so the loss is O(1) whatever the
+    residual-stream scale of the trunk (EAGLE regresses raw Llama features, whose norms are large;
+    a freshly initialised small trunk has norms near 0.02 and the raw loss would be inert).
+    """
+    T = h0.shape[1]
+    pred = h_k[:, : T - k].float().contiguous()
+    target = h0[:, k:].detach().float().contiguous()  # sliced views are non-contiguous; MPS kernels need contiguous inputs
+    scale = target.pow(2).mean(-1, keepdim=True).sqrt().clamp_min(1e-6)
+    return F.smooth_l1_loss(pred / scale, target / scale)
+
+
+def combine(ntp: torch.Tensor, mtp: list[torch.Tensor], loss_weight: float, feat: list[torch.Tensor] = (), feature_loss_weight: float = 0.0) -> torch.Tensor:
+    total = ntp
+    if mtp:
+        total = total + loss_weight / len(mtp) * torch.stack(list(mtp)).sum()
+    if feat:
+        total = total + feature_loss_weight / len(feat) * torch.stack(list(feat)).sum()
+    return total
 
 
 def compute_losses(model, idx: torch.Tensor, targets: torch.Tensor) -> Losses:
@@ -71,11 +92,14 @@ def compute_losses(model, idx: torch.Tensor, targets: torch.Tensor) -> Losses:
     h0 = trunk(idx)
     ntp = cross_entropy(trunk.logits(h0), targets)
     mtp: list[torch.Tensor] = []
+    feat: list[torch.Tensor] = []
     if heads is not None:
         h_in = h0.detach() if mcfg.detach_trunk else h0
         for k, h_k in enumerate(heads.forward_train(h_in, idx, trunk), start=1):
             mtp.append(depth_loss(heads.logits(k, h_k, trunk), targets, k))
-    return Losses(combine(ntp, mtp, mcfg.loss_weight), ntp, mtp)
+            if mcfg.feature_loss_weight:
+                feat.append(feature_loss(h_k, h0, k))
+    return Losses(combine(ntp, mtp, mcfg.loss_weight, feat, mcfg.feature_loss_weight), ntp, mtp, feat)
 
 
 def train_step(model, idx: torch.Tensor, targets: torch.Tensor, memory_efficient: bool = True) -> Losses:
@@ -111,6 +135,7 @@ def train_step(model, idx: torch.Tensor, targets: torch.Tensor, memory_efficient
         # own loss gradient plus whatever depth k+1 sent into its bridge.
         outs: list[torch.Tensor] = []
         bridges: list[torch.Tensor] = []
+        feat: list[torch.Tensor] = []
         prev = h_in
         for k in range(1, D + 1):
             emb = trunk.embed(idx[:, k:])
@@ -122,12 +147,21 @@ def train_step(model, idx: torch.Tensor, targets: torch.Tensor, memory_efficient
             prev = bridge
         for k in range(D, 0, -1):
             loss_k = depth_loss(heads.logits(k, outs[k - 1], trunk), targets, k)
-            tensors, grads = [scale * loss_k], [None]
+            local = scale * loss_k
+            if mcfg.feature_loss_weight:
+                feat_k = feature_loss(outs[k - 1], h0, k)
+                local = local + mcfg.feature_loss_weight / D * feat_k
+                feat.insert(0, feat_k.detach())
+            tensors, grads = [local], [None]
             if k < D and bridges[k - 1].grad is not None:
                 tensors.append(outs[k - 1])
                 grads.append(bridges[k - 1].grad)
             torch.autograd.backward(tensors, grads)
             mtp.insert(0, loss_k.detach())
+        if h0_d.grad is not None:
+            h0.backward(h0_d.grad)
+        total = combine(ntp.detach(), mtp, mcfg.loss_weight, feat, mcfg.feature_loss_weight)
+        return Losses(total, ntp.detach(), mtp, feat)
     if h0_d.grad is not None:
         h0.backward(h0_d.grad)
     total = combine(ntp.detach(), mtp, mcfg.loss_weight)

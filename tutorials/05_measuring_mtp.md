@@ -135,6 +135,71 @@ single module at depths it was never trained for (what DeepSeek-V3 does); `seq3`
    noise. This matches the literature's shape - no quality penalty at small `lambda`, gains only
    claimed at scale - and is why this repository does not advertise MTP as a quality lever.
 
+## Robustness: a second seed
+
+`python scripts/sweep.py --seed 1 --out runs/sweep_seed1` repeats the whole sweep with a
+different initialisation and data order; `scripts/aggregate_sweeps.py` pools the two. Cells are
+mean +- half the range.
+
+| run | val NTP loss | acc_0 | acc_1 | acc_2 | acc_3 |
+|---|---|---|---|---|---|
+| `ntp` | 1.517 +- 0.003 | 0.546 +- 0.001 | - | - | - |
+| `seq1_l0.1` | 1.518 +- 0.001 | 0.547 +- 0.000 | 0.528 +- 0.004 | - | - |
+| `seq1_l0.3` | 1.507 +- 0.003 | 0.549 +- 0.001 | 0.540 +- 0.000 | - | - |
+| `seq1_l1.0` | 1.513 +- 0.000 | 0.546 +- 0.001 | 0.548 +- 0.002 | - | - |
+| `seq1_detach` | 1.518 +- 0.004 | 0.548 +- 0.003 | 0.521 +- 0.000 | - | - |
+| `par3_block` | 1.509 +- 0.001 | 0.546 +- 0.001 | 0.365 +- 0.001 | 0.258 +- 0.001 | 0.208 +- 0.001 |
+| `par3_mlp` | 1.501 +- 0.002 | 0.547 +- 0.001 | 0.343 +- 0.003 | 0.240 +- 0.001 | 0.197 +- 0.002 |
+| `seq3` | 1.511 +- 0.006 | 0.547 +- 0.001 | 0.526 +- 0.001 | 0.536 +- 0.002 | 0.544 +- 0.005 |
+| `shared3` | 1.507 +- 0.005 | 0.548 +- 0.002 | 0.523 +- 0.002 | 0.532 +- 0.003 | 0.532 +- 0.003 |
+
+| run | K | conditional acceptance by depth | tokens per trunk pass |
+|---|---|---|---|
+| `seq1_l0.1` | 1 | 0.77 +- 0.00 | 1.77 +- 0.00 |
+| `seq1_l0.1` | 2 (recursive) | 0.77 +- 0.01, 0.54 +- 0.12 | 2.19 +- 0.11 |
+| `seq1_l0.1` | 3 (recursive) | 0.76 +- 0.02, 0.54 +- 0.10, 0.50 +- 0.01 | 2.37 +- 0.16 |
+| `seq1_l0.3` | 1 | 0.82 +- 0.01 | 1.82 +- 0.01 |
+| `seq1_l0.3` | 2 (recursive) | 0.82 +- 0.01, 0.46 +- 0.07 | 2.20 +- 0.07 |
+| `seq1_l0.3` | 3 (recursive) | 0.83 +- 0.01, 0.49 +- 0.05, 0.37 +- 0.05 | 2.40 +- 0.05 |
+| `seq1_l1.0` | 1 | 0.80 +- 0.01 | 1.80 +- 0.01 |
+| `seq1_l1.0` | 2 (recursive) | 0.79 +- 0.00, 0.47 +- 0.01 | 2.16 +- 0.01 |
+| `seq1_l1.0` | 3 (recursive) | 0.80 +- 0.02, 0.47 +- 0.01, 0.45 +- 0.03 | 2.34 +- 0.06 |
+| `seq1_detach` | 1 | 0.79 +- 0.02 | 1.79 +- 0.02 |
+| `seq1_detach` | 2 (recursive) | 0.79 +- 0.04, 0.67 +- 0.02 | 2.32 +- 0.08 |
+| `seq1_detach` | 3 (recursive) | 0.79 +- 0.04, 0.64 +- 0.01, 0.62 +- 0.02 | 2.61 +- 0.11 |
+| `par3_block` | 1 | 0.64 +- 0.07 | 1.64 +- 0.07 |
+| `par3_block` | 2 | 0.61 +- 0.06, 0.53 +- 0.06 | 1.93 +- 0.06 |
+| `par3_block` | 3 | 0.62 +- 0.05, 0.51 +- 0.05, 0.46 +- 0.10 | 2.07 +- 0.08 |
+| `par3_mlp` | 1 | 0.55 +- 0.01 | 1.55 +- 0.01 |
+| `par3_mlp` | 2 | 0.52 +- 0.02, 0.53 +- 0.00 | 1.79 +- 0.04 |
+| `par3_mlp` | 3 | 0.52 +- 0.02, 0.49 +- 0.01, 0.39 +- 0.03 | 1.87 +- 0.03 |
+| `seq3` | 1 | 0.81 +- 0.02 | 1.81 +- 0.02 |
+| `seq3` | 2 | 0.82 +- 0.01, 0.82 +- 0.03 | 2.49 +- 0.04 |
+| `seq3` | 3 | 0.78 +- 0.03, 0.84 +- 0.01, 0.85 +- 0.03 | 3.00 +- 0.10 |
+| `seq3` | 4 (recursive) | 0.84 +- 0.01, 0.82 +- 0.02, 0.83 +- 0.00, 0.55 +- 0.04 | 3.42 +- 0.10 |
+| `shared3` | 1 | 0.79 +- 0.04 | 1.79 +- 0.04 |
+| `shared3` | 2 | 0.76 +- 0.05, 0.83 +- 0.04 | 2.38 +- 0.12 |
+| `shared3` | 3 | 0.76 +- 0.03, 0.81 +- 0.05, 0.85 +- 0.03 | 2.89 +- 0.14 |
+| `shared3` | 4 | 0.76 +- 0.05, 0.81 +- 0.06, 0.80 +- 0.03, 0.82 +- 0.04 | 3.28 +- 0.25 |
+
+What survives two seeds, and what does not:
+
+- Teacher-forced numbers are stable to +-0.005: the `lambda` ordering of depth-1 accuracy
+  (0.528 < 0.540 < 0.548), the detached-trunk gap (0.521 vs 0.540), block > MLP (0.365 vs 0.343)
+  and the parallel-vs-sequential gap are all real effects, if small ones.
+- Next-token loss differences between variants (1.501-1.518) are inside the seed spread
+  (+-0.003-0.006) and should be read as "no effect".
+- Acceptance rates carry +-0.05-0.10 of seed noise at trained depths and up to +-0.12 at
+  untrained recursive depths, and tokens-per-pass +-0.1-0.25. Conclusions that rest on
+  differences smaller than that (e.g. `seq3` vs `shared3` at `K <= 3`) are ties; the
+  untrained-depth penalty (0.55 vs 0.82 at depth 4) and the `D = 1` recursion penalty
+  (~0.47 vs ~0.82 at depth 2) are far outside it.
+- One effect only visible with the second seed: the detached-trunk module recurses *better*
+  than the jointly trained one (0.67 / 0.64 vs 0.46 / 0.49 at depths 2 / 3, replicated to
+  +-0.02). A plausible reading is that joint training lets the trunk shape its states for the
+  module, making the module's own outputs a worse substitute for them; chapter 06 shows the
+  direct fix (feature regression) and measures it.
+
 ## The cost model, made visible
 
 `metrics.speedup_estimate` divides tokens per pass by `1 + draft_cost`. With one block per

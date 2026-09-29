@@ -10,9 +10,9 @@
 
 [![tests](https://github.com/ysjprojects/awesome-mtp/actions/workflows/tests.yml/badge.svg)](https://github.com/ysjprojects/awesome-mtp/actions/workflows/tests.yml)
 
-**Status:** Part I written. Chapters 01-05 and the framework they build are complete and
-tested (`pytest`: 31 tests, including an exact lossless-decoding check against greedy search).
-Chapters 06-12 are planned; see [the roadmap](#12-the-tutorial-roadmap-and-status).
+**Status:** Part I written. Chapters 01-06 and the framework they build are complete and
+tested (`pytest`: 43 tests, including exact lossless-decoding checks against greedy search).
+Chapters 07-12 are planned; see [the roadmap](#12-the-tutorial-roadmap-and-status).
 
 ---
 
@@ -281,7 +281,7 @@ feature*, from which the shared unembedding produces the token. EAGLE-2 grows a 
 sized by the drafter's confidence; EAGLE-3 drops the feature-regression loss and feeds
 low/mid/high-layer features, training with simulated multi-step drafting ("training-time
 test"). Kimi K3 pre-trains a DeepSeek-style MTP layer and then fine-tunes it into an EAGLE-3
-drafter, which is the cleanest statement of how the two families relate. Planned for chapter 06.
+drafter, which is the cleanest statement of how the two families relate. Chapter 06 implements the single-cache drafter and the feature-regression loss, and measures both; draft trees are chapter 07.
 
 **Cross-attending drafters (Gemma 4).** The MTP head is a 4-layer transformer (three local, one
 global attention layer; width 256 for E2B/E4B, 1024 for 26B-A4B/31B) that takes the trunk's
@@ -294,12 +294,12 @@ after the prompt and read `K` future predictions off their positions in one trun
 adds gated LoRA (the base path is untouched, so NTP outputs are bit-identical), a small sampler
 MLP that conditions each future token on the previous sampled one, and a consistency loss;
 ESP shows an untrained probe drawn from the embedding space already works because decoder
-layers align mask states with next-token states. Planned for chapter 07.
+layers align mask states with next-token states. Planned for chapter 08.
 
 **Registers (MuToR 2025).** Interleave learnable register tokens into the input; each register at
 position `t` is trained to predict `x_{t+k}` and is masked out of the attention of ordinary
 tokens, so the pretrained model's NTP path is untouched. No new heads, negligible parameters,
-works for SFT, PEFT and pre-training, and extends to image generation. Planned for chapter 07.
+works for SFT, PEFT and pre-training, and extends to image generation. Planned for chapter 08.
 
 **Joint-distribution heads.** Independent heads cannot represent dependencies between
 `x_{t+1}` and `x_{t+2}`. Fixes: a rank-`r` canonical tensor decomposition of the joint over the
@@ -372,6 +372,9 @@ hierarchical models (2026) make multi-byte outputs expressive and adaptive. Plan
 
 - **vLLM**: `speculative_config` with MTP methods for DeepSeek, Qwen3-Next/3.5/3.6, GLM, LongCat,
   Kimi K3, Gemma 4, MiniMax; the `speculators` project trains/serves EAGLE-3 and FastMTP heads.
+  Native MTP modules are run through the same proposer as EAGLE drafters: one draft cache, the
+  module fed its own output for every step after the first (chapter 06 implements and measures
+  this discipline against the training-consistent per-depth one).
 - **SGLang**: EAGLE-style MTP speculative decoding for DeepSeek-V3/R1 and successors; Windowed-MTP's
   experiments were run in SGLang.
 - **TensorRT-LLM**: MTP speculative decoding for DeepSeek-V3/R1-class models.
@@ -496,9 +499,9 @@ depend on the tokenizer.
 | 03 | [Sequential MTP](tutorials/03_sequential_mtp.md) | the DeepSeek-V3 module; shared-weight recursive variant; per-depth accuracy | done |
 | 04 | [Self-speculative decoding](tutorials/04_self_speculative_decoding.md) | draft / verify / accept / rewind for both head families; greedy and rejection sampling; the lossless proof; acceptance-to-speedup arithmetic | done |
 | 05 | [Measuring MTP](tutorials/05_measuring_mtp.md) | a controlled sweep: loss weight, detached vs joint training, block vs MLP heads, separate vs shared vs recursively-reused modules; acceptance-by-depth, tokens-per-pass and speedup-model figures | done |
-| 06 | Feature-level drafting and trees | an EAGLE-style drafter on trunk features; tree verification; Medusa-style typical acceptance | planned |
-| 07 | Mask tokens, gated LoRA and registers | Apple-style masked-input MTP with gated LoRA and a sampler head; MuToR registers; ESP probing | planned |
-| 08 | Training recipes | loss-weight schedules, forward/reverse curricula, decay-phase head expansion, self-distillation (FastMTP), AdaMTP masking | planned |
+| 06 | [Feature-level drafting](tutorials/06_feature_level_drafting.md) | the EAGLE single-cache drafter (how vLLM/SGLang run MTP heads) vs per-depth caches; EAGLE-1 feature regression; measured on the chapter 05 models | done |
+| 07 | Trees and non-lossless acceptance | tree verification (Medusa, EAGLE-2, ESP); typical acceptance; draft-tree shaping from drafter confidence | planned |
+| 08 | Mask tokens, gated LoRA, registers and training recipes | Apple-style masked-input MTP with gated LoRA and a sampler head; MuToR registers; ESP probing; loss schedules, curricula, decay-phase head expansion, self-distillation (FastMTP), AdaMTP masking | planned |
 | 09 | MTP and RL | acceptance under entropy, rejection-sampled drafts, joint MTP+RL loss calibration, speculative rollouts | planned |
 | 10 | Serving | batched verification, CUDA graphs, draft-KV windowing, loading real MTP checkpoints (Qwen3.5, Gemma 4, DeepSeek) into the framework | planned |
 | 11 | Beyond next-k tokens | joint samplers (PTP/K-Forcing), block-diffusion drafters (DFlash), byte-level heads, leap prediction | planned |
@@ -554,7 +557,7 @@ mtp/
   model.py    Trunk (decoder) and MTPModel (trunk + heads)
   heads.py    ParallelHeads (Gloeckle / Medusa) and SequentialMTP (DeepSeek-V3 / shared-weight)
   loss.py     target alignment, DeepSeek-style loss combination, memory-efficient train_step
-  decode.py   generate(), SpeculativeDecoder (draft / verify / accept / rewind), speculative_generate()
+  decode.py   generate(), SpeculativeDecoder (draft / verify / accept / rewind), per-depth and EAGLE single-cache drafters
   metrics.py  per-depth accuracy, acceptance -> tokens-per-round -> speedup arithmetic
   data.py     character-level TinyShakespeare
   train.py    training CLI          bench.py   decoding benchmark CLI
@@ -583,7 +586,15 @@ variants, same trunk and budget): the auxiliary loss weight in {0.1, 0.3, 1.0} n
 the next-token head nor changes depth-1 quality much; joint training beats a frozen trunk for
 the head at no cost to the trunk; block heads edge out MLP heads; and reusing a module past its
 trained depth costs roughly 30 points of acceptance at that depth, which shared-weight training
-recovers.
+recovers. A second seed (`scripts/aggregate_sweeps.py`) confirms the teacher-forced orderings to
++-0.005 and puts +-0.05-0.25 of noise on acceptance and tokens-per-pass, which the chapter uses
+to separate real effects from ties.
+
+[Chapter 06](tutorials/06_feature_level_drafting.md) then shows that EAGLE-1 feature regression
+fixes the recursion penalty for a single module (depth-2/3 acceptance 0.84/0.74 vs 0.53/0.32,
+matching a module trained at three depths) while hurting one that was already trained
+recursively, and that the engines' single-cache drafting discipline costs no acceptance
+against the training-consistent per-depth caches.
 
 ![conditional acceptance by depth for the nine sweep variants](assets/acceptance_by_depth.png)
 
@@ -603,6 +614,7 @@ recovers.
 | **committed vs decided** | in `decode.py`, committed tokens have gone through the trunk (they are in the KV cache); the decided-but-uncommitted `t1` is the next round's first verify input |
 | **teacher-forced accuracy** | top-1 accuracy of depth `k` against the *corpus* with the true prefix; predicts greedy acceptance but is measured without decoding |
 | **MTP prefill / draft-KV tax** | running the draft modules over the whole prompt so their caches exist; scales with context length (Windowed-MTP) |
+| **cache discipline** | per-depth caches (each depth attends over its own depth's slots, as in multi-module training) vs a single EAGLE-style cache (the module attends over true states then its own predictions; what engines run). Chapter 06 |
 | **lossless** | the output distribution equals the target model's (rejection sampling) or the output equals greedy search exactly (`temperature = 0`); typical-acceptance and self-distilled parallel decoders are not lossless |
 
 Reading a model card: "trained with MTP, `D` layers" tells you the auxiliary loss was used and

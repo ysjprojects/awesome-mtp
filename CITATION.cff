@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this tutorial or framework, please cite it as below."
+title: "Awesome MTP: Multi-Token Prediction, from the papers to a working framework"
+authors:
+  - family-names: Yu
+    given-names: Shi Jie
+year: 2026
+url: "https://github.com/ysjprojects/awesome-mtp"
+license: MIT

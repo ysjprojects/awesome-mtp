@@ -164,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--head-layers", type=int, default=1)
     p.add_argument("--share-weights", action="store_true")
     p.add_argument("--detach-trunk", action="store_true")
+    p.add_argument("--feature-loss-weight", type=float, default=0.0, help="EAGLE-1 feature regression weight (sequential only)")
     p.add_argument("--d-model", type=int, default=256)
     p.add_argument("--n-layers", type=int, default=6)
     p.add_argument("--n-heads", type=int, default=8)
@@ -197,6 +198,7 @@ def main(argv: list[str] | None = None) -> None:
         head_layers=a.head_layers,
         share_weights=a.share_weights,
         detach_trunk=a.detach_trunk,
+        feature_loss_weight=a.feature_loss_weight,
     )
     cfg = TrainConfig(
         steps=a.steps,

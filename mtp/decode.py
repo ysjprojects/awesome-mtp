@@ -90,6 +90,18 @@ class SpecStats:
         self.drafted = self.drafted or [0] * self.draft_len
         self.accepted = self.accepted or [0] * self.draft_len
 
+    def merge(self, other: "SpecStats") -> "SpecStats":
+        """Pool the counts of two runs with the same draft length (e.g. several prompts)."""
+        if other.draft_len != self.draft_len:
+            raise ValueError("cannot merge stats with different draft lengths")
+        return SpecStats(
+            self.draft_len,
+            self.rounds + other.rounds,
+            self.generated + other.generated,
+            [a + b for a, b in zip(self.drafted, other.drafted)],
+            [a + b for a, b in zip(self.accepted, other.accepted)],
+        )
+
     @property
     def mean_accepted(self) -> float:
         """Average number of accepted draft tokens per verify pass."""
@@ -199,6 +211,69 @@ class _SequentialDrafter:
                 cache.truncate(valid)
 
 
+class _EagleDrafter:
+    """Single-cache recursive drafting with one sequential module (the EAGLE pattern, and how
+    vLLM/SGLang run DeepSeek- and Qwen-style MTP heads).
+
+    The module's cache holds one slot per position. Committed slots pair the trunk's *true* state
+    at position ``t`` with the token at ``t + 1`` (exactly depth 1 of ``_SequentialDrafter``);
+    draft slots pair the module's *own previous output* with the previously drafted token, so
+    the drafter attends over a mixed history. After verification every draft slot is discarded
+    and the accepted positions are re-processed with their true trunk states, so committed slots
+    never contain self-predicted features.
+    """
+
+    def __init__(self, dec: "SpeculativeDecoder"):
+        heads = dec.model.heads
+        if not hasattr(heads, "step"):
+            raise ValueError("the eagle drafter needs sequential heads")
+        if not (heads.share_weights or heads.n_future == 1):
+            raise ValueError("the eagle drafter reuses one module at every step; needs share_weights or n_future == 1")
+        if dec.draft_len > heads.n_future and not (heads.share_weights or dec.recursive):
+            raise ValueError(
+                f"draft_len {dec.draft_len} > n_future={heads.n_future}: drafting past the trained depth with a "
+                "single module needs share_weights=True or recursive=True"
+            )
+        self.heads = heads
+        self.caches = heads.new_caches(1, 1, dec.capacity, dec.trunk)
+        self.true_len = 0  # slots computed from true trunk states; everything beyond is a draft
+        self.last_logits: list[torch.Tensor] = []
+        self.last_feats: list[torch.Tensor] = []
+
+    def draft(self, dec: "SpeculativeDecoder") -> tuple[torch.Tensor, torch.Tensor]:
+        n, K = dec.n, dec.draft_len
+        # 1. Extend the true-state prefix to slot n-1: slot t pairs h0[t] with the token at t+1,
+        #    which for t = n-1 is the decided-but-uncommitted t1.
+        start = self.true_len
+        prev = dec.h0[:, start:n]
+        ahead = torch.cat((dec.tokens[start + 1 : n], dec.t1[None]))
+        cos, sin = dec.trunk.rope(torch.arange(start + 1, n + 1, device=dec.device))
+        f = self.heads.step(1, prev, dec.trunk.embed(ahead[None]), cos, sin, self.caches)[:, -1:]
+        self.true_len = n
+        # 2. Recurse: the output for position n + j - 1 and the draft d_j form the next slot.
+        proposals, probs, self.last_logits, self.last_feats = [], [], [], [f]
+        for j in range(1, K + 1):
+            logits = self.heads.logits(1, f[:, -1], dec.trunk)
+            self.last_logits.append(logits)
+            q = dec.probs(logits)
+            probs.append(q)
+            d = dec.sample(q)[0]
+            proposals.append(d)
+            if j == K:
+                break
+            cos, sin = dec.trunk.rope(torch.arange(n + j, n + j + 1, device=dec.device))
+            f = self.heads.step(1, f, dec.trunk.embed(d[None, None]), cos, sin, self.caches)
+            self.last_feats.append(f)
+        return torch.stack(proposals)[None], torch.stack(probs, dim=1)
+
+    def rollback(self, n: int) -> None:
+        for cache in self.caches:
+            cache.truncate(self.true_len)
+
+
+DRAFTERS = {"depth": _SequentialDrafter, "eagle": _EagleDrafter}
+
+
 class SpeculativeDecoder:
     """Stateful self-speculative decoder for a single sequence (``idx`` of shape ``(1, T)``)."""
 
@@ -212,19 +287,31 @@ class SpeculativeDecoder:
         top_k: int | None = None,
         generator: torch.Generator | None = None,
         recursive: bool = False,
+        drafter: str = "depth",
     ):
         """``recursive=True`` lets a sequential model draft beyond its trained depth by reusing its
-        deepest module (DeepSeek-V3 practice); models trained with ``share_weights`` never need it."""
+        deepest module (DeepSeek-V3 practice); models trained with ``share_weights`` never need it.
+
+        ``drafter`` selects the cache discipline for sequential heads: ``"depth"`` keeps one cache
+        per depth (training-consistent for multi-module MTP), ``"eagle"`` keeps a single cache and
+        feeds the module its own outputs (the EAGLE / vLLM / SGLang pattern). Parallel heads have
+        only one drafter.
+        """
         if model.heads is None:
             raise ValueError("speculative decoding needs a model with MTP heads")
         if idx.shape[0] != 1:
             raise ValueError("SpeculativeDecoder handles one sequence at a time")
         if draft_len < 1:
             raise ValueError("draft_len must be >= 1")
+        if drafter not in DRAFTERS:
+            raise ValueError(f"unknown drafter {drafter!r}; choose from {sorted(DRAFTERS)}")
+        if model.mtp_cfg.kind == "parallel" and drafter != "depth":
+            raise ValueError("parallel heads support only the default drafter")
         self.model, self.trunk = model, model.trunk
         self.device = self.trunk.device
         self.draft_len, self.temperature, self.top_k, self.generator = draft_len, temperature, top_k, generator
         self.recursive = recursive
+        self.drafter_kind = drafter
         self.max_new_tokens = max_new_tokens
         T = idx.shape[1]
         self.capacity = T + max_new_tokens + draft_len + 1
@@ -245,7 +332,7 @@ class SpeculativeDecoder:
         self.n = T  # committed tokens processed by the trunk
         self.t1 = self.sample(self.probs(self.trunk.logits(h[:, -1])))[0]
         self.stats.generated = 1
-        self.drafter = _ParallelDrafter(self) if model.mtp_cfg.kind == "parallel" else _SequentialDrafter(self)
+        self.drafter = _ParallelDrafter(self) if model.mtp_cfg.kind == "parallel" else DRAFTERS[drafter](self)
 
     # -- helpers --------------------------------------------------------------------------
     def probs(self, logits: torch.Tensor) -> torch.Tensor:
@@ -321,8 +408,9 @@ def speculative_generate(
     top_k: int | None = None,
     generator: torch.Generator | None = None,
     recursive: bool = False,
+    drafter: str = "depth",
 ) -> tuple[torch.Tensor, SpecStats]:
-    dec = SpeculativeDecoder(model, idx, max_new_tokens, draft_len, temperature, top_k, generator, recursive)
+    dec = SpeculativeDecoder(model, idx, max_new_tokens, draft_len, temperature, top_k, generator, recursive, drafter)
     while not dec.done:
         dec.round()
     return dec.output(), dec.stats

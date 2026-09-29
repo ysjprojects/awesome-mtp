@@ -31,7 +31,9 @@ Rules that the tests enforce and you should keep:
 
 ## 2. A new drafter
 
-Drafters live in [`mtp/decode.py`](../mtp/decode.py) and implement:
+Drafters live in [`mtp/decode.py`](../mtp/decode.py); sequential-head drafters are registered
+in the `DRAFTERS` dict (`"depth"` = per-depth caches, `"eagle"` = single cache) and selected
+with `SpeculativeDecoder(..., drafter=...)` / `bench --drafter`. A new one implements:
 
 ```python
 class Drafter:

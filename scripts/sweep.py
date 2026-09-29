@@ -46,7 +46,7 @@ VARIANTS: dict[str, tuple[dict, list[tuple[int, bool]]]] = {
 PROMPTS = ["ROMEO:", "JULIET:", "First Citizen:", "KING RICHARD III:"]
 
 
-def bench(model, ds: CharDataset, settings: list[tuple[int, bool]], max_new_tokens: int) -> list[dict]:
+def bench(model, ds: CharDataset, settings: list[tuple[int, bool]], max_new_tokens: int, drafter: str = "depth") -> list[dict]:
     rows = []
     for K, recursive in settings:
         accepted = [0] * K
@@ -54,7 +54,7 @@ def bench(model, ds: CharDataset, settings: list[tuple[int, bool]], max_new_toke
         for prompt in PROMPTS:
             idx = ds.encode(prompt)[None]
             base = generate(model, idx, max_new_tokens)
-            out, stats = speculative_generate(model, idx, max_new_tokens, K, recursive=recursive)
+            out, stats = speculative_generate(model, idx, max_new_tokens, K, recursive=recursive, drafter=drafter)
             if not torch.equal(out, base):
                 raise RuntimeError(f"speculative output diverged from greedy for K={K}")
             rounds += stats.rounds
@@ -68,6 +68,7 @@ def bench(model, ds: CharDataset, settings: list[tuple[int, bool]], max_new_toke
             {
                 "K": K,
                 "recursive": recursive,
+                "drafter": drafter,
                 "rounds": rounds,
                 "acceptance_by_depth": by_depth,
                 "mean_accepted": sum(accepted) / rounds,
@@ -103,6 +104,7 @@ def main() -> None:
     p.add_argument("--device", default="auto")
     p.add_argument("--out", default="runs/sweep")
     p.add_argument("--skip-train", action="store_true")
+    p.add_argument("--seed", type=int, default=0, help="training seed (data order + init); use with --out runs/sweep_seed1")
     a = p.parse_args()
 
     ds = CharDataset(load_tinyshakespeare("data"))
@@ -121,7 +123,7 @@ def main() -> None:
                 MTPConfig(**mtp_kw),
                 TrainConfig(
                     steps=a.steps, seq_len=a.seq_len, batch_size=a.batch_size, eval_every=a.steps // 4,
-                    log_every=100, device=a.device, out_dir=out_dir,
+                    log_every=100, device=a.device, out_dir=out_dir, seed=a.seed,
                 ),
                 ds,
             )

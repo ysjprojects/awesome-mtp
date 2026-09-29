@@ -11,9 +11,10 @@ order the first time; the later ones assume the vocabulary of the earlier ones (
 | 03 | [Sequential MTP](03_sequential_mtp.md) | `heads.py::SequentialMTP`, chained backward in `loss.py` | `--kind sequential --n-future 2`, `--n-future 3 --share-weights` |
 | 04 | [Self-speculative decoding](04_self_speculative_decoding.md) | `decode.py`, `metrics.py`, `bench.py` | `python -m mtp.bench --ckpt ... --draft-len 1 2 3` |
 | 05 | [Measuring MTP](05_measuring_mtp.md) | `scripts/sweep.py`, `scripts/plot_results.py`, `--recursive` | `python scripts/sweep.py && python scripts/plot_results.py` |
+| 06 | [Feature-level drafting](06_feature_level_drafting.md) | `decode.py::_EagleDrafter` (`--drafter eagle`), `loss.py::feature_loss` (`--feature-loss-weight`) | `python scripts/ch06_drafters.py` |
 
-Planned: 06 feature-level drafting and tree verification; 07 mask tokens, gated LoRA and
-registers; 08 training recipes; 09 MTP and RL; 10 serving and real checkpoints; 11 beyond
+Planned: 07 tree verification and non-lossless acceptance; 08 mask tokens, gated LoRA,
+registers and training recipes; 09 MTP and RL; 10 serving and real checkpoints; 11 beyond
 next-`k` tokens; 12 a scaling study. The [README roadmap](../README.md#12-the-tutorial-roadmap-and-status)
 tracks status.
 

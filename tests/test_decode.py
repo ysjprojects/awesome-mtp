@@ -110,6 +110,66 @@ def test_speculative_sampling_matches_target_distribution():
     assert tv < 0.1, float(tv)
 
 
+EAGLE_CONFIGS = [
+    # (n_future, share_weights, draft_len, recursive)
+    (1, True, 3, False),
+    (1, False, 1, False),
+    (1, False, 3, True),
+    (3, True, 4, False),
+]
+
+
+@pytest.mark.parametrize("n_future,share,K,recursive", EAGLE_CONFIGS)
+def test_eagle_drafter_is_lossless_and_rewinds(n_future, share, K, recursive):
+    model = trained_model("sequential", n_future, "block", share)
+    for candidate, expect_rejections in ((model, False), (_with_random_heads(model), True)):
+        accepted = rejected = 0
+        for prompt in _prompts(3):
+            greedy = generate(candidate, prompt, 40)
+            spec, stats = speculative_generate(candidate, prompt, 40, K, recursive=recursive, drafter="eagle")
+            assert torch.equal(spec, greedy)
+            accepted += sum(stats.accepted)
+            rejected += stats.rounds * K - sum(stats.accepted)
+        assert (rejected > 0) if expect_rejections else (accepted > 0)
+
+
+@pytest.mark.parametrize("n_future,share,K,recursive", EAGLE_CONFIGS)
+def test_eagle_drafter_cache_matches_uncached_forward(n_future, share, K, recursive):
+    """The single mixed cache (true states for committed slots, self-predicted states for draft
+    slots) must reproduce a from-scratch causal forward over the same inputs and positions."""
+    model = _with_random_heads(trained_model("sequential", n_future, "block", share))
+    prompt = _prompts(1)[0]
+    dec = SpeculativeDecoder(model, prompt, max_new_tokens=60, draft_len=K, recursive=recursive, drafter="eagle")
+    for _ in range(6):
+        dec.round()
+    with torch.no_grad():
+        drafts, _ = dec.drafter.draft(dec)
+        n = dec.n
+        feats = dec.drafter.last_feats  # predicted states for positions n .. n+K-2
+        prev = torch.cat([dec.h0[:, :n]] + feats[:-1], dim=1) if K > 1 else dec.h0[:, :n]
+        toks = torch.cat((dec.tokens[1:n], dec.t1[None], drafts[0, : K - 1]))[None]
+        cos, sin = model.trunk.rope(torch.arange(1, n + K, device=prompt.device))
+        ref = model.heads.step(1, prev, model.trunk.embed(toks), cos, sin)
+        for j in range(K):
+            ref_logits = model.heads.logits(1, ref[:, n - 1 + j], model.trunk)
+            assert torch.allclose(dec.drafter.last_logits[j], ref_logits, atol=1e-4), j
+        assert dec.drafter.caches[0].length == n + K - 1
+        dec.drafter.rollback(n)
+        assert dec.drafter.caches[0].length == n
+
+
+def test_eagle_drafter_rejects_multi_module_and_parallel_heads():
+    prompt = torch.randint(0, VOCAB, (1, 5))
+    with pytest.raises(ValueError):
+        SpeculativeDecoder(make_model("sequential", 2), prompt, 5, draft_len=2, drafter="eagle")
+    with pytest.raises(ValueError):
+        SpeculativeDecoder(make_model("parallel", 2), prompt, 5, draft_len=2, drafter="eagle")
+    with pytest.raises(ValueError):
+        SpeculativeDecoder(make_model("sequential", 1), prompt, 5, draft_len=2, drafter="eagle")  # needs recursive
+    with pytest.raises(ValueError):
+        SpeculativeDecoder(make_model("sequential", 1), prompt, 5, draft_len=1, drafter="tree")
+
+
 def test_invalid_speculative_configurations_are_rejected():
     par = make_model("parallel", 2)
     seq = make_model("sequential", 2)

@@ -36,6 +36,8 @@ def _grads(model):
         ("sequential", 3, {}),
         ("sequential", 2, {"share_weights": True}),
         ("sequential", 2, {"detach_trunk": True}),
+        ("sequential", 2, {"feature_loss_weight": 0.5}),
+        ("sequential", 3, {"share_weights": True, "feature_loss_weight": 1.0}),
     ],
 )
 def test_memory_efficient_train_step_matches_naive_backward(kind, n_future, kw):
@@ -70,3 +72,14 @@ def test_detach_trunk_keeps_mtp_gradients_out_of_the_trunk():
     for (name, p), (_, q) in zip(model.trunk.blocks.named_parameters(), ntp_only.trunk.blocks.named_parameters()):
         assert torch.allclose(p.grad, q.grad, atol=1e-6), name
     assert all(p.grad is not None for p in model.heads.parameters())
+
+
+def test_feature_loss_reports_per_depth_terms_and_is_off_by_default():
+    idx = torch.randint(0, VOCAB, (2, 16))
+    targets = torch.randint(0, VOCAB, (2, 16))
+    assert compute_losses(make_model("sequential", 2), idx, targets).feat == []
+    losses = compute_losses(make_model("sequential", 2, feature_loss_weight=0.5), idx, targets)
+    assert len(losses.feat) == 2 and all(float(f.detach()) > 0 for f in losses.feat)
+    assert "feat2" in losses.as_floats()
+    with pytest.raises(ValueError):
+        make_model("parallel", 2, feature_loss_weight=0.5)

@@ -70,6 +70,11 @@ class MTPConfig:
     detach_trunk:
         Do not send MTP gradients into the trunk (Medusa-1 style training of heads on a frozen
         model). Also used by the loss ablations in the tutorials.
+    feature_loss_weight:
+        For ``kind="sequential"``: EAGLE-1 style feature regression. Depth ``k``'s output at slot
+        ``t`` is additionally pulled (Smooth-L1) toward the trunk's own state at position ``t + k``,
+        so that a module fed its own output at inference sees inputs that look like trunk states.
+        ``0`` disables it (DeepSeek-V3, EAGLE-3).
     """
 
     kind: str = "none"
@@ -79,6 +84,7 @@ class MTPConfig:
     head_layers: int = 1
     share_weights: bool = False
     detach_trunk: bool = False
+    feature_loss_weight: float = 0.0
 
     def __post_init__(self) -> None:
         if self.kind not in {"none", "parallel", "sequential"}:
@@ -91,6 +97,10 @@ class MTPConfig:
             raise ValueError("MTP requires n_future >= 1")
         if self.share_weights and self.kind != "sequential":
             raise ValueError("share_weights only applies to kind='sequential'")
+        if self.feature_loss_weight and self.kind != "sequential":
+            raise ValueError("feature_loss_weight only applies to kind='sequential'")
+        if self.feature_loss_weight < 0:
+            raise ValueError("feature_loss_weight must be >= 0")
 
 
 def to_dict(cfg: Any) -> dict[str, Any]:
